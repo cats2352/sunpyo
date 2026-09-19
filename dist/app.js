@@ -41,6 +41,12 @@
   let selectedText = null;
   let dragText = null;
   let panDrag = null;
+  let activePenPointerId = null;
+  let pencilOnly = false;
+  let pencilModeManuallyOff = false;
+  const fingers = new Map();
+  const ignoredFingers = new Set();
+  let pinch = null;
   let editor = null;
   let editSnapshot = null;
   let editText = null;
@@ -80,6 +86,45 @@
     applyViewScale();
   }
 
+  function setPencilMode(enabled, manual = false) {
+    pencilOnly = enabled;
+    if (manual) pencilModeManuallyOff = !enabled;
+    $('#pencilOnly').checked = enabled;
+    stage.classList.toggle('pencil-mode', enabled);
+    if (!settingsPanel.classList.contains('settings-open')) {
+      $('#mobileSettingsBtn').textContent = enabled ? '⚙ 설정 · 펜슬 모드' : '⚙ 설정 열기';
+    }
+    if (!enabled) { fingers.clear(); ignoredFingers.clear(); pinch = null; }
+  }
+
+  function midpoint(a, b) {
+    return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  }
+
+  function beginPinch() {
+    const [a, b] = [...fingers.values()];
+    const center = midpoint(a, b);
+    const rect = board.getBoundingClientRect();
+    pinch = {
+      distance: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
+      factor: zoomFactor,
+      anchorX: (center.x - rect.left) / viewScale,
+      anchorY: (center.y - rect.top) / viewScale,
+    };
+    for (const finger of fingers.values()) finger.hadPinch = true;
+  }
+
+  function updatePinch() {
+    const [a, b] = [...fingers.values()];
+    const center = midpoint(a, b);
+    const distance = Math.hypot(a.x - b.x, a.y - b.y);
+    zoomFactor = Math.min(4, Math.max(1, pinch.factor * distance / pinch.distance));
+    applyViewScale(false);
+    const rect = board.getBoundingClientRect();
+    stage.scrollLeft += rect.left + pinch.anchorX * viewScale - center.x;
+    stage.scrollTop += rect.top + pinch.anchorY * viewScale - center.y;
+  }
+
   function focusCell(cell) {
     stage.scrollLeft = Math.max(0, cell.x1 * viewScale - 20);
     stage.scrollTop = Math.max(0, cell.y1 * viewScale - 84);
@@ -89,7 +134,7 @@
     settingsPanel.classList.remove('settings-open');
     $('#settingsScrim').classList.remove('open');
     $('#mobileSettingsBtn').setAttribute('aria-expanded', 'false');
-    $('#mobileSettingsBtn').textContent = '⚙ 설정 열기';
+    $('#mobileSettingsBtn').textContent = pencilOnly ? '⚙ 설정 · 펜슬 모드' : '⚙ 설정 열기';
   }
 
   function canvasSize() {
@@ -543,7 +588,74 @@
     if (mobileView()) closeSettings();
   }
 
+  stage.addEventListener('pointerdown', (event) => {
+    if (!pencilOnly || event.pointerType !== 'touch' || event.target.closest('.cell-editor')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    stage.setPointerCapture(event.pointerId);
+    if (activePenPointerId !== null) { ignoredFingers.add(event.pointerId); return; }
+    const finger = {
+      x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY,
+      scrollLeft: stage.scrollLeft, scrollTop: stage.scrollTop,
+      onBoard: event.target === board, moved: false, hadPinch: false,
+    };
+    fingers.set(event.pointerId, finger);
+    if (fingers.size === 2) beginPinch();
+  }, true);
+
+  stage.addEventListener('pointermove', (event) => {
+    if (ignoredFingers.has(event.pointerId)) { event.preventDefault(); return; }
+    const finger = fingers.get(event.pointerId);
+    if (!finger) return;
+    event.preventDefault();
+    finger.x = event.clientX;
+    finger.y = event.clientY;
+    if (Math.hypot(finger.x - finger.startX, finger.y - finger.startY) > 8) finger.moved = true;
+    if (fingers.size >= 2) {
+      if (!pinch) beginPinch();
+      updatePinch();
+    } else if (finger.moved) {
+      stage.scrollLeft = finger.scrollLeft - (finger.x - finger.startX);
+      stage.scrollTop = finger.scrollTop - (finger.y - finger.startY);
+    }
+  });
+
+  function endFinger(event, cancelled = false) {
+    if (ignoredFingers.delete(event.pointerId)) { event.preventDefault(); return; }
+    const finger = fingers.get(event.pointerId);
+    if (!finger) return;
+    event.preventDefault();
+    fingers.delete(event.pointerId);
+    if (!cancelled && !finger.moved && !finger.hadPinch && finger.onBoard) {
+      const cell = cellAt(pointer(event));
+      if (cell) openCellEditor(cell);
+    }
+    pinch = null;
+    for (const remaining of fingers.values()) {
+      remaining.startX = remaining.x;
+      remaining.startY = remaining.y;
+      remaining.scrollLeft = stage.scrollLeft;
+      remaining.scrollTop = stage.scrollTop;
+      remaining.hadPinch = true;
+    }
+  }
+
+  stage.addEventListener('pointerup', endFinger);
+  stage.addEventListener('pointercancel', (event) => endFinger(event, true));
+  document.addEventListener('pointerup', (event) => {
+    if (event.pointerId === activePenPointerId) activePenPointerId = null;
+  });
+  document.addEventListener('pointercancel', (event) => {
+    if (event.pointerId === activePenPointerId) activePenPointerId = null;
+  });
+
   board.addEventListener('pointerdown', (event) => {
+    if (event.pointerType === 'pen') {
+      activePenPointerId = event.pointerId;
+      if (!pencilModeManuallyOff && !pencilOnly) setPencilMode(true);
+      fingers.clear();
+      pinch = null;
+    }
     const point = pointer(event);
     if (tool === 'pan') {
       board.setPointerCapture(event.pointerId);
@@ -589,7 +701,8 @@
     if (dragText) { dragText.item.x = snap(point.x - dragText.dx); dragText.item.y = snap(point.y - dragText.dy); render(); }
   });
 
-  board.addEventListener('pointerup', () => {
+  board.addEventListener('pointerup', (event) => {
+    if (event.pointerId === activePenPointerId) activePenPointerId = null;
     panDrag = null;
     lineGuide = null;
     if (draftLine) {
@@ -609,17 +722,21 @@
       dragText = null; render();
     }
   });
-  board.addEventListener('pointercancel', () => { draftLine = draftStroke = dragText = lineGuide = panDrag = null; render(); });
+  board.addEventListener('pointercancel', (event) => {
+    if (event.pointerId === activePenPointerId) activePenPointerId = null;
+    draftLine = draftStroke = dragText = lineGuide = panDrag = null; render();
+  });
 
   document.querySelectorAll('.tool[data-tool]').forEach((button) => button.addEventListener('click', () => setTool(button.dataset.tool)));
   $('#zoomOut').addEventListener('click', () => setZoom(zoomFactor / 1.5));
   $('#zoomIn').addEventListener('click', () => setZoom(zoomFactor * 1.5));
   $('#zoomReset').addEventListener('click', () => setZoom(1));
+  $('#pencilOnly').addEventListener('change', (event) => setPencilMode(event.target.checked, true));
   $('#mobileSettingsBtn').addEventListener('click', () => {
     const open = settingsPanel.classList.toggle('settings-open');
     $('#settingsScrim').classList.toggle('open', open);
     $('#mobileSettingsBtn').setAttribute('aria-expanded', String(open));
-    $('#mobileSettingsBtn').textContent = open ? '설정 닫기' : '⚙ 설정 열기';
+    $('#mobileSettingsBtn').textContent = open ? '설정 닫기' : (pencilOnly ? '⚙ 설정 · 펜슬 모드' : '⚙ 설정 열기');
   });
   $('#settingsScrim').addEventListener('click', closeSettings);
   document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && settingsPanel.classList.contains('settings-open')) closeSettings(); });

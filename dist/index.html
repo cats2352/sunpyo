@@ -13,6 +13,7 @@
   <main><aside id="settingsPanel" aria-label="편집 도구">
     <section class="section"><h2>도구</h2><div class="tool-list" role="toolbar" aria-label="그리기 도구"><button class="tool active" data-tool="line" title="선 그리기"><span class="icon">╱</span><span class="label">선</span></button><button class="tool" data-tool="pen" title="펜"><span class="icon">✎</span><span class="label">펜</span></button><button class="tool" data-tool="text" title="텍스트"><span class="icon">T</span><span class="label">텍스트</span></button><button class="tool" data-tool="select" title="텍스트 선택"><span class="icon">↖</span><span class="label">선택</span></button><button class="tool" data-tool="eraser" title="지우개"><span class="icon">⌫</span><span class="label">지우기</span></button><button class="tool" data-tool="pan" title="화면 이동"><span class="icon">✋</span><span class="label">화면 이동</span></button></div></section>
     <button id="mobileSettingsBtn" class="mobile-settings-btn" type="button" aria-expanded="false" aria-controls="settingsPanel">⚙ 설정 열기</button>
+    <section class="section"><h2>펜슬 입력</h2><label class="inline"><input id="pencilOnly" type="checkbox"><span>펜슬로만 그리기</span></label><p class="hint" style="margin-top:9px">펜슬을 감지하면 자동으로 켜집니다. 켜진 동안 손가락 한 개는 이동·칸 선택, 두 개는 확대/축소에 사용합니다. 끄면 손가락으로도 그릴 수 있습니다.</p></section>
     <section class="section"><h2>선과 펜</h2><label>색상 <span class="inline"><input id="color" type="color" value="#15302a"><span id="colorHex">#15302A</span></span></label><label>스타일<select id="lineStyle"><option value="solid">실선</option><option value="dashed">파선</option><option value="dotted">점선</option></select></label><label>굵기 <span id="lineWidthLabel">2 px</span><input id="lineWidth" type="range" min="1" max="14" value="2"></label></section>
     <section class="section"><h2>정렬 보조</h2><label class="inline"><input id="alignAssist" type="checkbox" checked><span>수평·수직 자동 정렬</span></label><label>격자 간격<select id="gridSize"><option value="10">10 px — 세밀하게</option><option value="20" selected>20 px — 기본</option><option value="40">40 px — 넓게</option><option value="0">격자 끄기</option></select></label></section>
     <section class="section"><h2>텍스트</h2><label>글자 크기<input id="fontSize" type="number" min="10" max="72" value="20"></label><button id="deleteTextBtn" style="margin-top:10px;width:100%">선택 텍스트 삭제</button><p class="hint" style="margin-top:9px">텍스트 도구로 닫힌 사각형 칸을 누르면 그 자리에서 입력하고 정렬을 고를 수 있습니다. 글이 많아지면 행이 아래로 늘어납니다.</p></section>
@@ -28,6 +29,7 @@
     .cell-editor textarea{width:100%;height:100%;min-height:36px;resize:none;border:0;outline:0;background:transparent;padding:8px;color:#102b23;font-family:inherit;line-height:1.35;overflow:hidden;white-space:pre-wrap;overflow-wrap:anywhere}
     .page-frame{position:relative;flex:none}
     .page{transform-origin:top left}
+    .stage-wrap.pencil-mode{touch-action:none}
     .page[data-tool="pan"] canvas{cursor:grab}
     .mobile-settings-btn,.settings-scrim{display:none}
     .zoom-controls{display:flex;align-items:center;gap:5px;flex:none}
