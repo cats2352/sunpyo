@@ -2,6 +2,7 @@
   'use strict';
 
   const KEY = 'sunpyo-canvas-v2';
+  const PDF_DB = 'sunpyo-pdf-v1';
   const SIZES = {
     'goodnotes-p': [1200, 1550],
     'goodnotes-l': [1550, 1200],
@@ -21,13 +22,14 @@
   const controls = {
     color: $('#color'), style: $('#lineStyle'), width: $('#lineWidth'),
     grid: $('#gridSize'), align: $('#alignAssist'), font: $('#fontSize'),
-    size: $('#pageSize'), transparent: $('#transparent'),
+    size: $('#pageSize'), transparent: $('#transparent'), includeBackground: $('#includePdfBackground'),
   };
 
   let state = { lines: [], strokes: [], texts: [], page: 'goodnotes-p' };
   try {
     const saved = JSON.parse(localStorage.getItem(KEY));
-    if (saved && SIZES[saved.page]) {
+    if (saved && (SIZES[saved.page] || (saved.page === 'pdf' && saved.pdf
+      && Number.isFinite(saved.pdf.width) && Number.isFinite(saved.pdf.height)))) {
       state = { ...state, ...saved, lines: saved.lines || [], strokes: saved.strokes || [], texts: saved.texts || [] };
     }
   } catch (_) { /* 손상된 임시 저장 내용은 무시합니다. */ }
@@ -51,8 +53,14 @@
   let editSnapshot = null;
   let editText = null;
   let editCell = null;
+  let pdfDocument = null;
+  let pdfDocumentId = null;
+  let pdfBackground = null;
+  let pdfBackgroundKey = null;
+  let pdfLoadToken = 0;
   const copy = (value) => JSON.parse(JSON.stringify(value));
-  const baseSize = () => SIZES[state.page] || SIZES['goodnotes-p'];
+  const baseSize = () => state.page === 'pdf' && state.pdf
+    ? [state.pdf.width, state.pdf.height] : (SIZES[state.page] || SIZES['goodnotes-p']);
   const mobileView = () => window.matchMedia('(max-width: 1024px)').matches;
   let zoomFactor = 1;
   let viewScale = 1;
@@ -142,6 +150,34 @@
     return [baseW, Math.max(baseH, state.height || 0)];
   }
 
+  function currentPdfKey() {
+    return state.page === 'pdf' && state.pdf ? `${state.pdf.id}:${state.pdf.pageNumber}` : null;
+  }
+
+  function activePdfBackground() {
+    return pdfBackgroundKey === currentPdfKey() ? pdfBackground : null;
+  }
+
+  function updatePdfControls() {
+    const metadata = state.pdf;
+    controls.size.querySelector('option[value="pdf"]').disabled = !metadata;
+    $('#pdfOptions').hidden = !metadata;
+    if (metadata) {
+      $('#pdfName').textContent = metadata.name;
+      $('#pdfPage').value = metadata.pageNumber;
+      const ready = pdfDocument && pdfDocumentId === metadata.id;
+      $('#pdfPage').disabled = !ready;
+      $('#pdfPage').max = ready ? pdfDocument.numPages : Math.max(1, metadata.pageNumber);
+      $('#pdfCount').textContent = ready ? `전체 ${pdfDocument.numPages}페이지` : 'PDF 불러오는 중';
+      $('#pdfPrev').disabled = !ready || metadata.pageNumber <= 1;
+      $('#pdfNext').disabled = !ready || metadata.pageNumber >= pdfDocument.numPages;
+    }
+    const available = Boolean(activePdfBackground());
+    controls.includeBackground.disabled = !available;
+    if (!available) controls.includeBackground.checked = false;
+    controls.transparent.disabled = controls.includeBackground.checked;
+  }
+
   function resizeCanvas() {
     const [width, height] = canvasSize();
     board.width = width;
@@ -149,8 +185,202 @@
     page.style.width = `${width}px`;
     page.style.height = `${height}px`;
     controls.size.value = state.page;
+    updatePdfControls();
     applyViewScale(false);
     render();
+  }
+
+  function openPdfDatabase() {
+    return new Promise((resolve, reject) => {
+      if (!('indexedDB' in window)) { reject(new Error('브라우저 저장소를 사용할 수 없습니다.')); return; }
+      const request = indexedDB.open(PDF_DB, 1);
+      request.onupgradeneeded = () => request.result.createObjectStore('files');
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  async function storePdfFile(id, bytes, name) {
+    const database = await openPdfDatabase();
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction('files', 'readwrite');
+      transaction.objectStore('files').put({ bytes, name }, id);
+      transaction.oncomplete = () => { database.close(); resolve(); };
+      transaction.onerror = () => { database.close(); reject(transaction.error); };
+      transaction.onabort = () => { database.close(); reject(transaction.error); };
+    });
+  }
+
+  async function readPdfFile(id) {
+    const database = await openPdfDatabase();
+    return new Promise((resolve, reject) => {
+      const transaction = database.transaction('files', 'readonly');
+      const request = transaction.objectStore('files').get(id);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => database.close();
+      transaction.onabort = () => { database.close(); reject(transaction.error); };
+    });
+  }
+
+  let pdfLibraryPromise;
+  function pdfLibrary() {
+    if (!pdfLibraryPromise) {
+      const legacy = new URL('vendor/pdfjs/pdf.legacy.min.mjs', document.baseURI).href;
+      const modern = new URL('vendor/pdfjs/pdf.min.mjs', document.baseURI).href;
+      pdfLibraryPromise = import(legacy)
+        .then((library) => ({ library, worker: 'vendor/pdfjs/pdf.worker.legacy.min.mjs' }))
+        .catch(() => import(modern).then((library) => ({ library, worker: 'vendor/pdfjs/pdf.worker.min.mjs' })))
+        .then(({ library, worker }) => {
+          library.GlobalWorkerOptions.workerSrc = new URL(worker, document.baseURI).href;
+          return library;
+        }).catch((error) => { pdfLibraryPromise = null; throw error; });
+    }
+    return pdfLibraryPromise;
+  }
+
+  async function createPdfDocument(bytes) {
+    const library = await pdfLibrary();
+    return library.getDocument({ data: new Uint8Array(bytes.slice(0)), enableScripting: false }).promise;
+  }
+
+  async function renderPdfPage(pdfDoc, number) {
+    const pdfPage = await pdfDoc.getPage(number);
+    const original = pdfPage.getViewport({ scale: 1 });
+    const scale = Math.min(1600 / original.width, 2200 / original.height);
+    const viewport = pdfPage.getViewport({ scale });
+    const image = document.createElement('canvas');
+    image.width = Math.max(1, Math.round(viewport.width));
+    image.height = Math.max(1, Math.round(viewport.height));
+    image.pdfWidthPt = original.width;
+    image.pdfHeightPt = original.height;
+    await pdfPage.render({ canvasContext: image.getContext('2d'), viewport, background: 'rgb(255,255,255)' }).promise;
+    pdfPage.cleanup();
+    return image;
+  }
+
+  async function syncPdfBackground() {
+    const token = ++pdfLoadToken;
+    const key = currentPdfKey();
+    if (!key) { pdfBackground = null; pdfBackgroundKey = null; updatePdfControls(); render(); return; }
+    if (activePdfBackground()) { updatePdfControls(); render(); return; }
+    pdfBackground = null;
+    pdfBackgroundKey = null;
+    updatePdfControls();
+    render();
+    try {
+      if (!pdfDocument || pdfDocumentId !== state.pdf.id) {
+        const stored = await readPdfFile(state.pdf.id);
+        if (!stored) throw new Error('저장된 PDF를 찾을 수 없습니다. 같은 파일을 다시 불러와 주세요.');
+        const loaded = await createPdfDocument(stored.bytes);
+        if (token !== pdfLoadToken) { await loaded.destroy(); return; }
+        if (pdfDocument) await pdfDocument.destroy();
+        pdfDocument = loaded;
+        pdfDocumentId = state.pdf.id;
+      }
+      const number = Math.max(1, Math.min(pdfDocument.numPages, state.pdf.pageNumber));
+      const image = await renderPdfPage(pdfDocument, number);
+      if (token !== pdfLoadToken || key !== currentPdfKey()) return;
+      pdfBackground = image;
+      pdfBackgroundKey = key;
+      updatePdfControls();
+      render();
+    } catch (error) {
+      if (token !== pdfLoadToken) return;
+      updatePdfControls();
+      $('#pdfCount').textContent = 'PDF를 다시 선택해 주세요.';
+      status.textContent = `PDF 배경을 열 수 없습니다: ${error.message}`;
+    }
+  }
+
+  async function importPdfFile(file) {
+    if (!file) return;
+    if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') {
+      status.textContent = 'PDF 파일을 선택해 주세요.';
+      return;
+    }
+    if (file.size > 30 * 1024 * 1024) {
+      status.textContent = '30MB 이하의 PDF를 선택해 주세요.';
+      return;
+    }
+    if (state.lines.length || state.strokes.length || state.texts.length) {
+      if (!confirm('현재 그림은 유지되지만 PDF 페이지 밖의 내용은 보이지 않을 수 있습니다. PDF를 불러올까요?')) return;
+    }
+    if (editor) closeEditor(true);
+    $('#pdfImportBtn').disabled = true;
+    status.textContent = 'PDF를 읽는 중입니다…';
+    try {
+      const bytes = await file.arrayBuffer();
+      const document = await createPdfDocument(bytes);
+      let image;
+      try { image = await renderPdfPage(document, 1); }
+      catch (error) { await document.destroy(); throw error; }
+      const id = window.crypto && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+      let stored = true;
+      try { await storePdfFile(id, bytes, file.name); }
+      catch (_) { stored = false; }
+      ++pdfLoadToken;
+      record();
+      if (pdfDocument) await pdfDocument.destroy();
+      pdfDocument = document;
+      pdfDocumentId = id;
+      state.pdf = { id, name: file.name, pageNumber: 1, width: image.width, height: image.height,
+        widthPt: image.pdfWidthPt, heightPt: image.pdfHeightPt };
+      state.page = 'pdf';
+      state.height = undefined;
+      pdfBackground = image;
+      pdfBackgroundKey = currentPdfKey();
+      controls.includeBackground.checked = false;
+      zoomFactor = 1;
+      resizeCanvas();
+      stage.scrollLeft = stage.scrollTop = 0;
+      persist();
+      status.textContent = stored
+        ? `PDF 1/${document.numPages}페이지를 불러왔습니다.`
+        : 'PDF는 열렸지만 기기에 저장되지 않았습니다. 새로고침 후 다시 선택해 주세요.';
+      if (mobileView()) closeSettings();
+    } catch (error) {
+      status.textContent = `PDF를 열 수 없습니다: ${error.message}`;
+    } finally {
+      $('#pdfImportBtn').disabled = false;
+      $('#pdfFile').value = '';
+    }
+  }
+
+  async function choosePdfPage(value) {
+    if (editor) closeEditor(true);
+    if (!state.pdf || !pdfDocument || pdfDocumentId !== state.pdf.id) return;
+    const number = Math.max(1, Math.min(pdfDocument.numPages, Math.round(Number(value) || 1)));
+    if (number === state.pdf.pageNumber && state.page === 'pdf') { updatePdfControls(); return; }
+    const id = state.pdf.id;
+    $('#pdfPage').disabled = true;
+    $('#pdfPrev').disabled = true;
+    $('#pdfNext').disabled = true;
+    status.textContent = `${number}페이지를 불러오는 중입니다…`;
+    try {
+      const image = await renderPdfPage(pdfDocument, number);
+      if (!state.pdf || state.pdf.id !== id) return;
+      ++pdfLoadToken;
+      record();
+      state.pdf.pageNumber = number;
+      state.pdf.width = image.width;
+      state.pdf.height = image.height;
+      state.pdf.widthPt = image.pdfWidthPt;
+      state.pdf.heightPt = image.pdfHeightPt;
+      state.page = 'pdf';
+      state.height = undefined;
+      pdfBackground = image;
+      pdfBackgroundKey = currentPdfKey();
+      zoomFactor = 1;
+      resizeCanvas();
+      stage.scrollLeft = stage.scrollTop = 0;
+      persist();
+      status.textContent = `PDF ${number}/${pdfDocument.numPages}페이지로 바꿨습니다.`;
+    } catch (error) {
+      status.textContent = `PDF 페이지를 열 수 없습니다: ${error.message}`;
+    } finally {
+      updatePdfControls();
+    }
   }
 
   function updateHistoryButtons() {
@@ -202,7 +432,7 @@
     future.push(copy(state));
     state = history.pop();
     selectedText = null;
-    resizeCanvas(); persist(); updateHistoryButtons();
+    resizeCanvas(); persist(); updateHistoryButtons(); syncPdfBackground();
     status.textContent = '마지막 작업을 되돌렸습니다.';
   }
 
@@ -212,7 +442,7 @@
     history.push(copy(state));
     state = future.pop();
     selectedText = null;
-    resizeCanvas(); persist(); updateHistoryButtons();
+    resizeCanvas(); persist(); updateHistoryButtons(); syncPdfBackground();
     status.textContent = '작업을 다시 적용했습니다.';
   }
 
@@ -347,6 +577,7 @@
   function render() {
     ctx.clearRect(0, 0, board.width, board.height);
     ctx.fillStyle = '#fffef9'; ctx.fillRect(0, 0, board.width, board.height);
+    if (activePdfBackground()) ctx.drawImage(pdfBackground, 0, 0);
     drawGrid();
     state.lines.forEach((item) => drawLine(item));
     state.strokes.forEach((item) => drawStroke(item));
@@ -557,18 +788,20 @@
 
   function outputCanvas() {
     const includeText = document.querySelector('input[name="content"]:checked').value !== 'lines';
+    const includeBackground = controls.includeBackground.checked && Boolean(activePdfBackground());
     const bounds = inkBounds(includeText);
     const margin = 24;
-    const left = bounds ? Math.max(0, Math.floor(bounds.x1 - margin)) : 0;
-    const top = bounds ? Math.max(0, Math.floor(bounds.y1 - margin)) : 0;
-    const right = bounds ? Math.min(board.width, Math.ceil(bounds.x2 + margin)) : board.width;
-    const bottom = bounds ? Math.min(board.height, Math.ceil(bounds.y2 + margin)) : board.height;
+    const left = !includeBackground && bounds ? Math.max(0, Math.floor(bounds.x1 - margin)) : 0;
+    const top = !includeBackground && bounds ? Math.max(0, Math.floor(bounds.y1 - margin)) : 0;
+    const right = !includeBackground && bounds ? Math.min(board.width, Math.ceil(bounds.x2 + margin)) : board.width;
+    const bottom = !includeBackground && bounds ? Math.min(board.height, Math.ceil(bounds.y2 + margin)) : board.height;
     const output = document.createElement('canvas');
     output.width = Math.max(1, right - left);
     output.height = Math.max(1, bottom - top);
     const target = output.getContext('2d');
-    if (!controls.transparent.checked) { target.fillStyle = '#fffef9'; target.fillRect(0, 0, output.width, output.height); }
+    if (includeBackground || !controls.transparent.checked) { target.fillStyle = '#fffef9'; target.fillRect(0, 0, output.width, output.height); }
     target.translate(-left, -top);
+    if (includeBackground) target.drawImage(pdfBackground, 0, 0);
     state.lines.forEach((item) => drawLine(item, target));
     state.strokes.forEach((item) => drawStroke(item, target));
     if (includeText) state.texts.filter((item) => item.text).forEach((item) => drawText(item, target));
@@ -744,7 +977,21 @@
   controls.width.addEventListener('input', () => { $('#lineWidthLabel').textContent = `${controls.width.value} px`; });
   controls.grid.addEventListener('change', render);
   controls.font.addEventListener('change', () => { if (editor) updateCellText(); });
-  controls.size.addEventListener('change', () => { if (editor) closeEditor(true); record(); state.page = controls.size.value; resizeCanvas(); persist(); status.textContent = '페이지 크기를 바꿨습니다.'; });
+  controls.size.addEventListener('change', () => {
+    if (editor) closeEditor(true);
+    record();
+    state.page = controls.size.value;
+    resizeCanvas(); persist(); syncPdfBackground();
+    status.textContent = '페이지 크기를 바꿨습니다.';
+  });
+  $('#pdfImportBtn').addEventListener('click', () => $('#pdfFile').click());
+  $('#pdfFile').addEventListener('change', (event) => importPdfFile(event.target.files[0]));
+  $('#pdfPage').addEventListener('change', (event) => choosePdfPage(event.target.value));
+  $('#pdfPrev').addEventListener('click', () => choosePdfPage(state.pdf.pageNumber - 1));
+  $('#pdfNext').addEventListener('click', () => choosePdfPage(state.pdf.pageNumber + 1));
+  controls.includeBackground.addEventListener('change', () => {
+    controls.transparent.disabled = controls.includeBackground.checked;
+  });
   $('#undoBtn').addEventListener('click', undo);
   $('#redoBtn').addEventListener('click', redo);
   $('#deleteTextBtn').addEventListener('click', () => {
@@ -762,16 +1009,22 @@
     if (editor) closeEditor(true);
     const link = document.createElement('a');
     link.href = outputCanvas().toDataURL('image/png');
-    link.download = controls.transparent.checked ? 'sunpyo-transparent.png' : 'sunpyo-table.png';
+    link.download = controls.includeBackground.checked && activePdfBackground()
+      ? 'sunpyo-with-pdf.png' : (controls.transparent.checked ? 'sunpyo-transparent.png' : 'sunpyo-table.png');
     link.click(); status.textContent = 'PNG 파일을 저장했습니다.';
   });
   $('#pdfBtn').addEventListener('click', () => {
     if (editor) closeEditor(true);
     const image = outputCanvas().toDataURL('image/png');
     const [width, height] = canvasSize();
+    const fullPdfPage = controls.includeBackground.checked && activePdfBackground()
+      && state.pdf && state.pdf.widthPt && state.pdf.heightPt && height === state.pdf.height;
+    const paperSize = fullPdfPage
+      ? `${state.pdf.widthPt}pt ${state.pdf.heightPt}pt` : (width > height ? 'landscape' : 'portrait');
+    const margin = fullPdfPage ? '0' : '8mm';
     const popup = window.open('', '_blank');
     if (!popup) { alert('PDF 저장을 위해 팝업을 허용해 주세요.'); return; }
-    popup.document.write(`<!doctype html><title>선표 PDF</title><style>@page{size:${width > height ? 'landscape' : 'portrait'};margin:8mm}body{margin:0}img{width:100%;height:auto}</style><img src="${image}" onload="print()">`);
+    popup.document.write(`<!doctype html><title>선표 PDF</title><style>@page{size:${paperSize};margin:${margin}}body{margin:0}img{display:block;width:100%;height:auto}</style><img src="${image}" onload="print()">`);
     popup.document.close(); status.textContent = '인쇄 창에서 “PDF로 저장”을 선택하세요.';
   });
   document.addEventListener('keydown', (event) => {
@@ -781,7 +1034,7 @@
     if ((event.key === 'Delete' || event.key === 'Backspace') && selectedText && document.activeElement === document.body) $('#deleteTextBtn').click();
   });
 
-  resizeCanvas(); updateHistoryButtons();
+  resizeCanvas(); updateHistoryButtons(); syncPdfBackground();
   if ('ResizeObserver' in window) new ResizeObserver(() => applyViewScale()).observe(stage);
   else window.addEventListener('resize', () => applyViewScale());
 })();
