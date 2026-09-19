@@ -36,7 +36,14 @@
     .zoom-controls button{min-width:38px;min-height:38px;padding:.25rem .45rem;border:1px solid #c7d6cf}
     #zoomReset{min-width:62px;font-size:.82rem}
     #statusText{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    @media(max-width:760px){
+    @media(min-width:1025px){
+      body{height:100dvh;display:flex;flex-direction:column;overflow:hidden}
+      .topbar{flex:none}
+      main{flex:1;min-height:0}
+      aside{max-height:none}
+      .work,.stage-wrap{min-height:0}
+    }
+    @media(max-width:1024px){
       body{height:100dvh;overflow:hidden;display:flex;flex-direction:column}
       .topbar{flex:none;min-height:auto;flex-direction:column;align-items:stretch;gap:8px;padding:8px 12px}
       .brand{gap:8px}.brand-mark{width:30px;height:30px}.brand small{display:none}
@@ -44,6 +51,8 @@
       .file-actions button{min-height:44px;padding:.35rem .2rem;font-size:.875rem;white-space:nowrap}
       main{display:flex;flex-direction:column;flex:1;min-height:0}
       aside{flex:none;padding:8px 12px 9px;overflow:visible}
+      aside .section{display:none}
+      aside .section:first-child{display:block;margin:0;padding:0;border:0}
       aside .section:first-child h2{display:none}
       .tool-list{grid-template-columns:repeat(6,minmax(0,1fr));gap:5px}
       .tool{min-width:0;min-height:44px;padding:.35rem;justify-content:center}

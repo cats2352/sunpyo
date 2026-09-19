@@ -53,7 +53,7 @@
   let editCell = null;
   const copy = (value) => JSON.parse(JSON.stringify(value));
   const baseSize = () => SIZES[state.page] || SIZES['goodnotes-p'];
-  const mobileView = () => window.matchMedia('(max-width: 760px)').matches;
+  const mobileView = () => window.matchMedia('(max-width: 1024px)').matches;
   let zoomFactor = 1;
   let viewScale = 1;
 
